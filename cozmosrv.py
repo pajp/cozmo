@@ -146,19 +146,14 @@ class StreamingHandler(BaseHTTPRequestHandler):
                         #print("waiting for condition")
                         output.condition.wait()
                         frame = output.frame
-                        # now add timestamp to jpeg
-                        # Convert to PIL Image
+
                         cv2.CV_LOAD_IMAGE_COLOR = 1 # set flag to 1 to give colour image
-                        #npframe = np.fromstring(frame, dtype=np.uint8)
-                        #pil_frame = 
-                        #pil_frame = cv2.imdecode(frame,-1)
-                        #cv2_im_rgb = cv2.cvtColor(pil_frame, cv2.COLOR_BGR2RGB)
+
                         pil_im = Image.open(io.BytesIO(frame))
 
                         draw = ImageDraw.Draw(pil_im)
 
                         # Choose a font
-                        #font = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSans.ttf", 25)
                         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
                         myText = self.server.robotstatus + " ";
                         if (self.server.robotcharging == 1):
@@ -192,16 +187,6 @@ class StreamingHandler(BaseHTTPRequestHandler):
 
                         pil_im.paste(button_img, (0, 0))
                         bg_w, bg_h = pil_im.size 
-                        # WeatherSTEM logo in lower left
-                        #size = 64
-                        #WSLimg = Image.open("WeatherSTEMLogoSkyBackground.png")
-                        #WSLimg.thumbnail((size,size),Image.ANTIALIAS)
-                        #pil_im.paste(WSLimg, (0, bg_h-size))
-
-                        # SkyWeather log in lower right
-                        #SWLimg = Image.open("SkyWeatherLogoSymbol.png")
-                        #SWLimg.thumbnail((size,size),Image.ANTIALIAS)
-                        #pil_im.paste(SWLimg, (bg_w-size, bg_h-size))
 
                         # Save the image
                         buf= io.BytesIO()
@@ -227,11 +212,6 @@ class StreamingServer(socketserver.ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
-
-#with picamera.PiCamera(resolution='640x480', framerate=24) as camera:
-#with picamera.PiCamera(resolution='1920x1080', framerate=24) as camera:
-
-#----
 
 output = StreamingOutput()
 address = ('', 4443)
@@ -289,21 +269,3 @@ def pycozmo_program(cli: pycozmo.client.Client):
 
 
 pycozmo.run_program(pycozmo_program)
-
-
-
-
-#-----
-
-
-# with picamera.PiCamera(resolution='1296x730', framerate=24) as camera:
-#     output = StreamingOutput()
-#     camera.start_recording(output, format='mjpeg')
-#     camera.annotate_foreground = picamera.Color(y=0.2,u=0, v=0)
-#     camera.annotate_background = picamera.Color(y=0.8, u=0, v=0)
-#     try:
-#         address = ('', 443)
-#         server = StreamingServer(address, StreamingHandler)
-#         server.serve_forever()
-#     finally:
-#         camera.stop_recording()
