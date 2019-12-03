@@ -20,10 +20,22 @@ PAGE="""\
 <html>
 <head>
 <title>cozmoctrl</title>
+<script language="javascript">
+function up() {
+	var oReq = new XMLHttpRequest();
+	//oReq.addEventListener("load", reqListener);
+	oReq.open("POST", "drive");
+	oReq.send(JSON.stringify({ "lspeed": 100, "rspeed": 100, "duration" : 1 }));
+}
+</script>
 </head>
 <body>
 <h1>cozmo!</h1>
-<img src="stream.mjpg" />
+<img src="stream.mjpg" /><br/>
+<span onClick="up()">⬆️</span>
+<span onClick="down()">⬇️</span>
+<span onClick="left()">⬅️</span>
+<span onClick="right()">➡️</span>
 </body>
 </html>
 """
@@ -64,8 +76,8 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 return        
             
         if self.path == '/tilt':
-            angle = int(input)
-            print("setting head angle to %d" % angle);
+            angle = float(input)
+            print("setting head angle to %0.2f" % angle);
             self.server.cozmoclient.set_head_angle(angle)
             self.send_response(200)
             self.end_headers()
@@ -76,6 +88,15 @@ class StreamingHandler(BaseHTTPRequestHandler):
             duration = float(data["duration"])
             print("*** drive: ", data)
             self.server.cozmoclient.drive_wheels(lwheel_speed=lspeed, rwheel_speed = rspeed, duration=duration)
+            self.send_response(200)
+            self.end_headers()
+        elif self.path == '/turn':
+            data = json.loads(input)
+            speed = float(data["speed"])
+            accel = float(data["accel"])
+            direction = float(data["direction"])
+            pkt = pycozmo.protocol_encoder.TurnInPlaceAtSpeed(wheel_speed_mmps=speed, wheel_accel_mmps2=accel, direction=direction)
+            self.server.cozmoclient.conn.send(pkt)
             self.send_response(200)
             self.end_headers()
         else:
@@ -91,29 +112,10 @@ class StreamingHandler(BaseHTTPRequestHandler):
         elif self.path == '/index.html':
             content = PAGE.encode('utf-8')
             self.send_response(200)
-            self.send_header('Content-Type', 'text/html')
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', len(content))
             self.end_headers()
             self.wfile.write(content)
-        elif self.path == '/forward':
-            self.server.cozmoclient.drive_wheels(lwheel_speed=100, rwheel_speed = 100, duration=1.0)
-            self.send_response(200)
-            self.end_headers()
-
-        elif self.path == '/back':
-            self.server.cozmoclient.drive_wheels(lwheel_speed=-100, rwheel_speed = -100, duration=1.0)
-            self.send_response(200)
-            self.end_headers()
-
-        elif self.path == '/turnleft':
-            self.server.cozmoclient.drive_wheels(lwheel_speed=-100, rwheel_speed = 100, duration=0.25)
-            self.send_response(200)
-            self.end_headers()
-
-        elif self.path == '/turnright':
-            self.server.cozmoclient.drive_wheels(lwheel_speed=100, rwheel_speed = -100, duration=0.25)
-            self.send_response(200)
-            self.end_headers()
 
         elif self.path == '/stream.mjpg':
             self.send_response(200)
@@ -240,7 +242,8 @@ def on_robot_charging(cli, state):
         
 def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
     del cli
-    server.robotstatus = "Batt: {:.01f} V".format(pkt.battery_voltage)
+    #server.robotstatus = "B: {:.01f}V g x:{:.01f} y:{:.01f} z:{:.01f}".format(pkt.battery_voltage, pkt.gyro_x, pkt.gyro_y, pkt.gyro_z)
+    server.robotstatus = "B: {:.01f}V".format(pkt.battery_voltage)
     #print("-> ", server.robotstatus)
 
 
