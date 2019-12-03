@@ -21,21 +21,37 @@ PAGE="""\
 <head>
 <title>cozmoctrl</title>
 <script language="javascript">
+
 function up() {
 	var oReq = new XMLHttpRequest();
 	//oReq.addEventListener("load", reqListener);
 	oReq.open("POST", "drive");
 	oReq.send(JSON.stringify({ "lspeed": 100, "rspeed": 100, "duration" : 1 }));
 }
+function down() {
+	var oReq = new XMLHttpRequest();
+	oReq.open("POST", "drive");
+	oReq.send(JSON.stringify({ "lspeed": -100, "rspeed": -100, "duration" : 1 }));
+}
+function left() {
+	var oReq = new XMLHttpRequest();
+	oReq.open("POST", "drive");
+	oReq.send(JSON.stringify({ "lspeed": -100, "rspeed": 100, "duration" : 0.3 }));
+}
+function right() {
+	var oReq = new XMLHttpRequest();
+	oReq.open("POST", "drive");
+	oReq.send(JSON.stringify({ "lspeed": 100, "rspeed": -100, "duration" : 0.3 }));
+}
 </script>
 </head>
 <body>
 <h1>cozmo!</h1>
 <img src="stream.mjpg" /><br/>
-<span onClick="up()">⬆️</span>
-<span onClick="down()">⬇️</span>
-<span onClick="left()">⬅️</span>
-<span onClick="right()">➡️</span>
+<span onClick="up();">⬆️</span>
+<span onClick="down();">⬇️</span>
+<span onClick="left();">⬅️</span>
+<span onClick="right();">➡️</span>
 </body>
 </html>
 """
@@ -249,8 +265,8 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
 
 def pycozmo_program(cli: pycozmo.client.Client):
     cli.add_handler(pycozmo.event.EvtRobotChargingChange, on_robot_charging)
-    angle = (pycozmo.robot.MAX_HEAD_ANGLE.radians - pycozmo.robot.MIN_HEAD_ANGLE.radians) / 2.0
-    cli.set_head_angle(angle)
+    #angle = (pycozmo.robot.MAX_HEAD_ANGLE.radians - pycozmo.robot.MIN_HEAD_ANGLE.radians) / 2.0
+    cli.set_head_angle(0.1)
     server.robotcharging = -1
 
     pkt = pycozmo.protocol_encoder.EnableCamera(enable=True)
