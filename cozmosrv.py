@@ -9,7 +9,7 @@ import traceback
 import time
 import json
 import numpy as np
-
+import os
 import datetime as dt
 
 #import SimpleHTTPServer
@@ -58,10 +58,27 @@ function right() {
 
 class StreamingOutput(object):
     def __init__(self):
+        self.clientCount = 0
         self.frame = None
         self.buffer = io.BytesIO()
         self.condition = Condition()
+        self.cozmoclient = None
 
+    def retain(self):
+        print("retain")
+        self.clientCount = self.clientCount + 1
+        if self.clientCount == 1:
+            print("enabling camera")
+            self.cozmoclient.add_handler(pycozmo.event.EvtNewRawCameraImage, on_camera_image, one_shot=False)
+
+
+    def release(self):
+        self.clientCount = self.clientCount - 1
+        print("release, %d clients remaining" % (self.clientCount))
+        if self.clientCount == 0:
+            print("no clients left, disabling camera")
+            self.cozmoclient.del_handler(pycozmo.event.EvtNewRawCameraImage, on_camera_image)
+            
     def write(self, buf):
         #print("writing...")
         if buf.startswith(b'\x89\x50'):
@@ -90,13 +107,30 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 self.send_response(402)
                 self.end_headers()
                 return        
-            
-        if self.path == '/tilt':
-            angle = float(input)
+
+        if self.path == '/image':
+            print("loading image, got %d bytes" % (c))
+            # Load image
+            im = Image.open(io.BytesIO(input))
+            # Convert to binary image.
+            im = im.convert('1')
+            self.server.cozmoclient.display_image(im)
+            self.send_response(200)
+            self.end_headers()
+        elif self.path == '/tilt':
+            range = pycozmo.MAX_HEAD_ANGLE.radians - pycozmo.MIN_HEAD_ANGLE.radians            
+            angle = float(input) * range
+            angle = angle + pycozmo.MIN_HEAD_ANGLE.radians
             print("setting head angle to %0.2f" % angle);
             self.server.cozmoclient.set_head_angle(angle)
             self.send_response(200)
             self.end_headers()
+        elif self.path == '/headlight':
+            enable = int(input)
+            print("setting head ligt to %d" % enable);
+            self.server.cozmoclient.set_head_light(enable)
+            self.send_response(200)
+            self.end_headers()            
         elif self.path == '/drive':
             data = json.loads(input)
             lspeed = int(data["lspeed"])
@@ -115,6 +149,16 @@ class StreamingHandler(BaseHTTPRequestHandler):
             self.server.cozmoclient.conn.send(pkt)
             self.send_response(200)
             self.end_headers()
+        elif self.path == '/lift':
+            data = json.loads(input)
+            height = float(data["height"]) * pycozmo.MAX_LIFT_HEIGHT.mm;
+            #accel  = float(data["accel"])
+            #max_speed = float(data["max_speed"])
+            #duration  = float(data["duration"])
+            self.server.cozmoclient.set_lift_height(height=height)
+            self.send_response(200)
+            self.end_headers()
+                                          
         else:
             self.send_response(404)
             self.end_headers()
@@ -132,8 +176,16 @@ class StreamingHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', len(content))
             self.end_headers()
             self.wfile.write(content)
-
+        elif self.path == '/status':
+            jsonstr = json.dumps(self.server.robotstatusdict)
+            jsonbytes = jsonstr.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/json; charset=utf-8')
+            self.send_header('Content-Length', len(jsonbytes))
+            self.end_headers()
+            self.wfile.write(jsonbytes)
         elif self.path == '/stream.mjpg':
+            output.retain()
             self.send_response(200)
             self.send_header('Age', 0)
             self.send_header('Cache-Control', 'no-cache, private')
@@ -143,10 +195,12 @@ class StreamingHandler(BaseHTTPRequestHandler):
             try:
                 while True:
                     with output.condition:
-                        #print("waiting for condition")
                         output.condition.wait()
                         frame = output.frame
-
+                        if (frame == b''):
+                            print("skipping empty frame")
+                            continue
+                        
                         cv2.CV_LOAD_IMAGE_COLOR = 1 # set flag to 1 to give colour image
 
                         pil_im = Image.open(io.BytesIO(frame))
@@ -198,11 +252,13 @@ class StreamingHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(frame)
                     self.wfile.write(b'\r\n')
+
             except Exception as e:
                 traceback.print_exc()
                 logging.warning(
                     'Removed streaming client %s: %s',
                     self.client_address, str(e))
+                output.release()
         else:
             self.send_error(404)
             self.end_headers()
@@ -220,10 +276,11 @@ framecount = 0
 def on_camera_image(cli, image):
     del cli
     global framecount
-    #print("saving image")
     framecount = framecount + 1
     if framecount % 10 == 0:
         image.save(output, "png")
+
+    server.robotstatusdict["last_image_acquisition"] = time.time()
 
 def on_robot_charging(cli, state):
     del cli
@@ -234,13 +291,27 @@ def on_robot_charging(cli, state):
         print("Stopped charging.")
         server.robotcharging = 0        
 
-
-        
 def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
-    del cli
     #server.robotstatus = "B: {:.01f}V g x:{:.01f} y:{:.01f} z:{:.01f}".format(pkt.battery_voltage, pkt.gyro_x, pkt.gyro_y, pkt.gyro_z)
     server.robotstatus = "B: {:.01f}V".format(pkt.battery_voltage)
-    #print("-> ", server.robotstatus)
+    newdict = { "battery_voltage" : pkt.battery_voltage,
+                "timestamp" : pkt.timestamp,
+                "accel" : { "x" : pkt.accel_x,
+                            "y" : pkt.accel_y,
+                            "z" : pkt.accel_z },
+                "gyro"  : { "x" : pkt.gyro_x,
+                            "y" : pkt.gyro_y,
+                            "z" : pkt.gyro_z },
+                "backpack_touch_sensor_raw" : pkt.backpack_touch_sensor_raw,
+                "pose" : { "x" : pkt.pose_x,
+                           "y" : pkt.pose_y,
+                           "z" : pkt.pose_z },
+                "status" : pkt.status }
+    if hasattr(server, 'robotstatusdict'):
+        server.robotstatusdict.update(newdict);
+    else:
+        server.robotstatusdict = newdict
+
 
 
 def pycozmo_program(cli: pycozmo.client.Client):
@@ -254,13 +325,10 @@ def pycozmo_program(cli: pycozmo.client.Client):
     pkt = pycozmo.protocol_encoder.EnableColorImages(enable=True)
     cli.conn.send(pkt)
 
-    # Wait for image to stabilize.
-    time.sleep(2.0)
-
     cli.conn.add_handler(pycozmo.protocol_encoder.RobotState, on_robot_state, one_shot=False)
-    cli.add_handler(pycozmo.event.EvtNewRawCameraImage, on_camera_image, one_shot=False)
+    #cli.add_handler(pycozmo.event.EvtNewRawCameraImage, on_camera_image, one_shot=False)
     server.cozmoclient = cli
-    
+    output.cozmoclient = cli
     try:
         server.serve_forever()
     finally:
