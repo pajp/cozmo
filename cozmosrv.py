@@ -1,8 +1,11 @@
+# -*- coding: utf-8 -*-
 import io
 import pycozmo
 import logging
 import socketserver
 from threading import Condition
+from threading import Timer
+from threading import Lock
 from PIL import ImageFont, ImageDraw, Image
 import cv2
 import traceback
@@ -11,12 +14,40 @@ import json
 import numpy as np
 import os
 import datetime as dt
+from time import sleep
+from sense_hat import SenseHat
+from threading import Thread
+from enum import Enum
+JoystickModes = Enum("JoystickModes", "Lift Drive")
 
 #import SimpleHTTPServer
 
 from http.server import BaseHTTPRequestHandler,HTTPServer
+sense = SenseHat()
+sense.set_rotation(180)
+pixels = []
+pixelon = True
+for i in range(0, 64):
+    fract = i/64
+    cf = int(255 * fract)
+    pixels.append((cf, 255-cf, i))
+sense.set_pixels(pixels)
+
+robotstatusblinky = False
+last_activity = time.time()
+connected = False
+connecting = False
+one_shot_camera = True
+one_shot_spf = 1
+joystick_mode = JoystickModes.Drive
+current_lift = 0.0
+address = ('', 4443)
+framecount = 0
+watchdog_robot_timeout = 20
+disconnecting = False
 
 PAGE="""\
+ccccccgiunhtfuujbcnfvrgkcgtjkrntnccbhnenjrin
 <html>
 <head>
 <title>cozmoctrl</title>
@@ -65,19 +96,19 @@ class StreamingOutput(object):
         self.cozmoclient = None
 
     def retain(self):
+        global connected
         print("retain")
         self.clientCount = self.clientCount + 1
         if self.clientCount == 1:
-            print("enabling camera")
-            self.cozmoclient.add_handler(pycozmo.event.EvtNewRawCameraImage, on_camera_image, one_shot=False)
+            camera_handler_setup()
 
 
     def release(self):
         self.clientCount = self.clientCount - 1
         print("release, %d clients remaining" % (self.clientCount))
-        if self.clientCount == 0:
-            print("no clients left, disabling camera")
-            self.cozmoclient.del_handler(pycozmo.event.EvtNewRawCameraImage, on_camera_image)
+        #if self.clientCount == 0:
+            #print("no clients left, disabling camera")
+            #self.cozmoclient.del_handler(pycozmo.event.EvtNewRawCameraImage, on_camera_image)
             
     def write(self, buf):
         #print("writing...")
@@ -95,7 +126,15 @@ class StreamingOutput(object):
 class StreamingHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
+        global connected
+        global last_activity
+        if not setupRobot():
+            self.send_error(500, "No robot :-(")
+            self.server.shutdown()
+            return
+
         contentlength = self.headers['Content-Length']
+        last_activity = time.time()
         if contentlength:
             c = int(contentlength)
             input = self.rfile.read(c)
@@ -151,7 +190,8 @@ class StreamingHandler(BaseHTTPRequestHandler):
             self.end_headers()
         elif self.path == '/lift':
             data = json.loads(input)
-            height = float(data["height"]) * pycozmo.MAX_LIFT_HEIGHT.mm;
+            current_lift = float(data["height"])
+            height = (current_lift * (pycozmo.MAX_LIFT_HEIGHT.mm - pycozmo.MIN_LIFT_HEIGHT.mm)) + pycozmo.MIN_LIFT_HEIGHT.mm;
             #accel  = float(data["accel"])
             #max_speed = float(data["max_speed"])
             #duration  = float(data["duration"])
@@ -165,6 +205,12 @@ class StreamingHandler(BaseHTTPRequestHandler):
             
                 
     def do_GET(self):
+        global last_activity
+        if not setupRobot():
+            self.send_error(500, "No robot :-(")
+            self.server.shutdown()
+            return
+
         if self.path == '/':
             self.send_response(301)
             self.send_header('Location', '/index.html')
@@ -184,6 +230,7 @@ class StreamingHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', len(jsonbytes))
             self.end_headers()
             self.wfile.write(jsonbytes)
+            last_activity = time.time()
         elif self.path == '/stream.mjpg':
             output.retain()
             self.send_response(200)
@@ -252,6 +299,7 @@ class StreamingHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(frame)
                     self.wfile.write(b'\r\n')
+                    last_activity = time.time()
 
             except Exception as e:
                 traceback.print_exc()
@@ -268,19 +316,40 @@ class StreamingServer(socketserver.ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
+def camera_handler_setup():
+    connectLock.acquire(blocking=True)
+    if server.cozmoclient:
+        if not one_shot_camera:
+            print("enabling camera")
+        server.cozmoclient.add_handler(pycozmo.event.EvtNewRawCameraImage, on_camera_image, one_shot=one_shot_camera)
+    else:
+        print("no Cozmo, not adding camera handler")
+    connectLock.release()
 
-output = StreamingOutput()
-address = ('', 4443)
-server = StreamingServer(address, StreamingHandler)
-framecount = 0
+def watchdog():
+    global disconnecting
+    if hasattr(server.robotstatusdict, "client_timestamp"):
+        last_status_report = server.robotstatusdict["client_timestamp"]
+        time_since_last_report = time.time() - last_status_report
+        if time_since_last_report > watchdog_robot_timeout:
+            print("No robot status received in %d seconds, exiting")
+            server.cozmoclient.disconnect()
+            disconnecting = False
+            quit()
+    t = Timer(10, watchdog)
+    t.start()
+
 def on_camera_image(cli, image):
     del cli
     global framecount
     framecount = framecount + 1
-    if framecount % 10 == 0:
-        image.save(output, "png")
+    image.save(output, "png")
 
     server.robotstatusdict["last_image_acquisition"] = time.time()
+
+    if one_shot_camera and output.clientCount > 0:
+        t = Timer(one_shot_spf, camera_handler_setup)
+        t.start()
 
 def on_robot_charging(cli, state):
     del cli
@@ -295,7 +364,8 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
     #server.robotstatus = "B: {:.01f}V g x:{:.01f} y:{:.01f} z:{:.01f}".format(pkt.battery_voltage, pkt.gyro_x, pkt.gyro_y, pkt.gyro_z)
     server.robotstatus = "B: {:.01f}V".format(pkt.battery_voltage)
     newdict = { "battery_voltage" : pkt.battery_voltage,
-                "timestamp" : pkt.timestamp,
+                "robot_timestamp" : pkt.timestamp,
+                "status_timestamp" : time.time(),
                 "accel" : { "x" : pkt.accel_x,
                             "y" : pkt.accel_y,
                             "z" : pkt.accel_z },
@@ -306,34 +376,187 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
                 "pose" : { "x" : pkt.pose_x,
                            "y" : pkt.pose_y,
                            "z" : pkt.pose_z },
+                "lift_height_mm" : pkt.lift_height_mm,
+                "head_angle_rad" : pkt.head_angle_rad,
+                "lift_height_max_mm" : pycozmo.MAX_LIFT_HEIGHT.mm,
+                "lift_height_min_mm" : pycozmo.MIN_LIFT_HEIGHT.mm,
+                "head_angle_min_rad" : pycozmo.MIN_HEAD_ANGLE.radians,
+                "head_angle_max_rad" : pycozmo.MAX_HEAD_ANGLE.radians,
                 "status" : pkt.status }
     if hasattr(server, 'robotstatusdict'):
         server.robotstatusdict.update(newdict);
     else:
         server.robotstatusdict = newdict
 
+    pixels = []
+    global robotstatusblinky
+    global connected, disconnecting
+    for i in range(0,64):
+        if disconnecting:
+            pixels.append((64,64,0))
+        elif not connected:
+            pixels.append((32,0,0))
+        elif connecting:
+            pixels.append((0, 64, 0))
+        elif i < 16:
+            if pkt.status & (1 << i):
+                pixels.append((0,0,128))
+            else:
+                pixels.append((128,128,128))
+        else:
+            if i == 16 and output.clientCount > 0:
+              pixels.append((128,0,0))
+            elif i == 17:
+                if robotstatusblinky == False:
+                    pixels.append((0, 128, 0))
+                    robotstatusblinky = True
+                else:
+                    pixels.append((0,0,0))
+                    robotstatusblinky = False
+            elif not disconnecting and (i >= 24 and i < 32):
+                idletime = time.time() - last_activity
+                lastlight = (idletime/40) + 24
+                #lastlight = (idletime) + 24
+                if lastlight > 32:
+                    lastlight = 32
+                if i <= lastlight:
+                    pixels.append((int((i-24)*(128.0/8.0)), int((8-(i-24))*(128.0/8.0)), 0, ))
+                else:
+                    pixels.append((0,0,0))
+                if lastlight == 32:
+                    if not disconnecting:
+                        print("idle disconnect")
+                        server.cozmoclient.disconnect()
+                        server.cozmoclient = None
+                        disconnecting = True
+                        connected = False
+                    else:
+                        print("pending disconnection")
+
+            else:
+                pixels.append((0,0,0))
+    if not connected and not connecting:
+        pixels = []
+        for i in range(0,64):
+            b = 0
+            r = int(i*(255.0/64.0))
+            if i < 32:
+                b = int((31-i)*(255.0/64))
+            pixels.append((r, 0, b))
+
+    sense.set_pixels(pixels)
 
 
-def pycozmo_program(cli: pycozmo.client.Client):
-    cli.add_handler(pycozmo.event.EvtRobotChargingChange, on_robot_charging)
-    #angle = (pycozmo.robot.MAX_HEAD_ANGLE.radians - pycozmo.robot.MIN_HEAD_ANGLE.radians) / 2.0
-    cli.set_head_angle(0.1)
-    server.robotcharging = -1
+def joystickthread():
+    global last_activity, joystick_mode, current_lift
+    while True:
+        event = sense.stick.wait_for_event()
+        last_activity = time.time()
+        print("Joystick: {} {} | mode: {}".format(event.action, event.direction, joystick_mode))
+        if event.action != "pressed":
+            continue
 
-    pkt = pycozmo.protocol_encoder.EnableCamera(enable=True)
-    cli.conn.send(pkt)
-    pkt = pycozmo.protocol_encoder.EnableColorImages(enable=True)
-    cli.conn.send(pkt)
+        if event.direction == "middle":
+            modes = list(JoystickModes)
+            new_mode = joystick_mode.value # value is index+1
+            if new_mode+1 > len(modes):
+                new_mode = 0
 
-    cli.conn.add_handler(pycozmo.protocol_encoder.RobotState, on_robot_state, one_shot=False)
-    #cli.add_handler(pycozmo.event.EvtNewRawCameraImage, on_camera_image, one_shot=False)
-    server.cozmoclient = cli
-    output.cozmoclient = cli
+            joystick_mode = modes[new_mode]
+            print("New joystick mode is {}".format(joystick_mode))
+
+        if joystick_mode == JoystickModes.Drive:
+            if event.direction == "up":
+                server.cozmoclient.drive_wheels(lwheel_speed=50, rwheel_speed = 50, duration=0.3)
+            if event.direction == "down":
+                server.cozmoclient.drive_wheels(lwheel_speed=-50, rwheel_speed = -50, duration=0.3)
+            if event.direction == "left":
+                server.cozmoclient.drive_wheels(lwheel_speed=-50, rwheel_speed = 50, duration=0.3)
+            if event.direction == "right":
+                server.cozmoclient.drive_wheels(lwheel_speed=50, rwheel_speed = -50, duration=0.3)
+
+        if joystick_mode == JoystickModes.Lift:
+            if event.direction == "up":
+                current_lift = current_lift + 0.1
+
+            if event.direction == "down":
+                current_lift = current_lift - 0.1
+
+            if current_lift > 1.0:
+                current_lift = 1.0
+            if current_lift < 0.0:
+                current_lift = 0
+
+            height = (current_lift * (pycozmo.MAX_LIFT_HEIGHT.mm - pycozmo.MIN_LIFT_HEIGHT.mm)) + pycozmo.MIN_LIFT_HEIGHT.mm;
+            server.cozmoclient.set_lift_height(height=height)
+
+connectLock = Lock()
+
+def setupRobot():
+    global connecting, connected, disconnecting
+    print("acquiring connect lock")
+    connectLock.acquire(blocking=True)
+    print("acquired connect lock")
+    if connected:
+        print("already connected")
+        connectLock.release()
+        return True
+
+    connecting = True
+    disconnecting = False
+
+    try:
+        cli = pycozmo.client.Client()
+        cli.start()
+        print("connecting")
+        cli.connect()
+        print("waiting for robot")
+        cli.wait_for_robot()
+        server.cozmoclient = cli
+        print("robot connected")
+        cli.add_handler(pycozmo.event.EvtRobotChargingChange, on_robot_charging)
+        #angle = (pycozmo.robot.MAX_HEAD_ANGLE.radians - pycozmo.robot.MIN_HEAD_ANGLE.radians) / 2.0
+        cli.set_head_angle(0.1)
+        server.robotcharging = -1
+        
+        cli.conn.add_handler(pycozmo.protocol_encoder.RobotState, on_robot_state, one_shot=False)
+    
+        pkt = pycozmo.protocol_encoder.EnableCamera()
+        cli.conn.send(pkt)
+        #pkt = pycozmo.protocol_encoder.EnableColorImages(enable=True)
+        
+        cli.conn.send(pkt)
+        
+        connected = True
+        connecting = False
+
+        connectLock.release()
+        print("setup done.")
+    
+        return True
+    except Exception as e:
+        connectLock.release()
+        print("failed to connect! " + str(e))
+        connecting = False
+        return False
+
+def run():
+    global connected
+    if not setupRobot():
+        exit(2)
+
+    timer = Timer(10, watchdog)
+    timer.setDaemon(True)
+    timer.start()
+    joysticker = Thread(target=joystickthread)
+    joysticker.setDaemon(True)
+    joysticker.start()
     try:
         server.serve_forever()
     finally:
         print("goodbye")
 
 
-
-pycozmo.run_program(pycozmo_program)
+output = StreamingOutput()
+server = StreamingServer(address, StreamingHandler)
+run()
