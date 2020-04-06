@@ -18,7 +18,7 @@ from time import sleep
 from sense_hat import SenseHat
 from threading import Thread
 from enum import Enum
-JoystickModes = Enum("JoystickModes", "Lift Drive")
+JoystickModes = Enum("JoystickModes", "Lift Drive HeadTilt")
 
 #import SimpleHTTPServer
 
@@ -41,6 +41,7 @@ one_shot_camera = True
 one_shot_spf = 1
 joystick_mode = JoystickModes.Drive
 current_lift = 0.0
+current_head_tilt = 0.0
 address = ('', 4443)
 framecount = 0
 watchdog_robot_timeout = 20
@@ -415,8 +416,8 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
                     robotstatusblinky = False
             elif not disconnecting and (i >= 24 and i < 32):
                 idletime = time.time() - last_activity
-                lastlight = (idletime/40) + 24
-                #lastlight = (idletime) + 24
+                #lastlight = (idletime/40) + 24
+                lastlight = (idletime) + 24
                 if lastlight > 32:
                     lastlight = 32
                 if i <= lastlight:
@@ -438,23 +439,25 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
     if not connected and not connecting:
         pixels = []
         for i in range(0,64):
+            r = i
+            g = 0
             b = 0
-            r = int(i*(255.0/64.0))
-            if i < 32:
-                b = int((31-i)*(255.0/64))
-            pixels.append((r, 0, b))
+            pixels.append((r, g, b))
 
     sense.set_pixels(pixels)
 
 
 def joystickthread():
-    global last_activity, joystick_mode, current_lift
+    global last_activity, joystick_mode, current_lift, current_head_tilt
     while True:
         event = sense.stick.wait_for_event()
         last_activity = time.time()
         print("Joystick: {} {} | mode: {}".format(event.action, event.direction, joystick_mode))
         if event.action != "pressed":
             continue
+
+        if not setupRobot():
+            exit(2)
 
         if event.direction == "middle":
             modes = list(JoystickModes)
@@ -465,6 +468,25 @@ def joystickthread():
             joystick_mode = modes[new_mode]
             print("New joystick mode is {}".format(joystick_mode))
 
+        if joystick_mode == JoystickModes.HeadTilt:
+            if event.direction == "up":
+                current_head_tilt = current_head_tilt + 0.1
+
+            if event.direction == "down":
+                current_head_tilt = current_head_tilt - 0.1
+
+            if current_head_tilt > 1.0:
+                current_head_tilt = 1.0
+            if current_head_tilt < 0.0:
+                current_head_tilt = 0
+
+            range = pycozmo.MAX_HEAD_ANGLE.radians - pycozmo.MIN_HEAD_ANGLE.radians
+            angle = float(current_head_tilt) * range
+            angle = angle + pycozmo.MIN_HEAD_ANGLE.radians
+            print("setting head angle to %0.2f" % angle)
+            server.cozmoclient.set_head_angle(angle)
+
+            
         if joystick_mode == JoystickModes.Drive:
             if event.direction == "up":
                 server.cozmoclient.drive_wheels(lwheel_speed=50, rwheel_speed = 50, duration=0.3)
