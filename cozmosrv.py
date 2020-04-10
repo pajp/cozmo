@@ -48,7 +48,6 @@ watchdog_robot_timeout = 20
 disconnecting = False
 
 PAGE="""\
-ccccccgiunhtfuujbcnfvrgkcgtjkrntnccbhnenjrin
 <html>
 <head>
 <title>cozmoctrl</title>
