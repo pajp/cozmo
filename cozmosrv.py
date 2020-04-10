@@ -18,11 +18,11 @@ from time import sleep
 from sense_hat import SenseHat
 from threading import Thread
 from enum import Enum
-JoystickModes = Enum("JoystickModes", "Lift Drive HeadTilt")
-
-#import SimpleHTTPServer
-
+import requests
 from http.server import BaseHTTPRequestHandler,HTTPServer
+
+JoystickModes = Enum("JoystickModes", "Drive Speed Lift HeadTilt")
+
 sense = SenseHat()
 sense.set_rotation(180)
 pixels = []
@@ -40,6 +40,7 @@ connecting = False
 one_shot_camera = True
 one_shot_spf = 1
 joystick_mode = JoystickModes.Drive
+joystick_speed = 3
 current_lift = 0.0
 current_head_tilt = 0.0
 address = ('', 4443)
@@ -392,49 +393,69 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
     global robotstatusblinky
     global connected, disconnecting
     for i in range(0,64):
-        if disconnecting:
-            pixels.append((64,64,0))
-        elif not connected:
-            pixels.append((32,0,0))
-        elif connecting:
-            pixels.append((0, 64, 0))
-        elif i < 16:
-            if pkt.status & (1 << i):
-                pixels.append((0,0,128))
-            else:
-                pixels.append((128,128,128))
-        else:
-            if i == 16 and output.clientCount > 0:
-              pixels.append((128,0,0))
-            elif i == 17:
-                if robotstatusblinky == False:
-                    pixels.append((0, 128, 0))
-                    robotstatusblinky = True
-                else:
-                    pixels.append((0,0,0))
-                    robotstatusblinky = False
-            elif not disconnecting and (i >= 24 and i < 32):
-                idletime = time.time() - last_activity
-                #lastlight = (idletime/40) + 24
-                lastlight = (idletime) + 24
-                if lastlight > 32:
-                    lastlight = 32
-                if i <= lastlight:
-                    pixels.append((int((i-24)*(128.0/8.0)), int((8-(i-24))*(128.0/8.0)), 0, ))
-                else:
-                    pixels.append((0,0,0))
-                if lastlight == 32:
-                    if not disconnecting:
-                        print("idle disconnect")
-                        server.cozmoclient.disconnect()
-                        server.cozmoclient = None
-                        disconnecting = True
-                        connected = False
-                    else:
-                        print("pending disconnection")
+        pixels.append((0,0,0))
 
+    # errors
+    if disconnecting:
+        pixels[0] = (64,64,0)
+    elif not connected:
+        pixels[0] = (32,0,0)
+    elif connecting:
+        pixels[0] = (0,64,0)
+    else: # connected, idle timeout handler and status blinkies
+
+        timeout = 10.0
+        idle = time.time() - last_activity
+        if idle >= timeout and not disconnecting:
+            print("idle disconnect")
+            disconnecting = True
+            server.cozmoclient.disconnect()
+            server.cozmoclient = None
+            connected = False
+
+        idle_fraction = idle / timeout
+        idle_leds = 8 * idle_fraction
+        
+        
+        for i in range(0,16): # 16 status bits
+            if pkt.status & (1 << i):
+                pixels[i] = (0,0,126)
             else:
-                pixels.append((0,0,0))
+                pixels[i] = (128,128,128)
+
+        for i in range(16,24): # 3rd row = number of streaming clients
+            if i-16 >= output.clientCount:
+                pixels[i] = (0,0,0)
+            else:
+                pixels[i] = (128,0,0)
+
+        for i in range(24,32): # 4th row = joystick mode indicator
+            if i-23 == joystick_mode.value:
+                pixels[i] = (0,128,0)
+            else:
+                pixels[i] = (0,0,0)
+
+        for i in range(32,40): # 5th row = speed indicator
+            if i-31 <= joystick_speed:
+                pixels[i] = (128,128,0)
+            else:
+                pixels[i] = (0,0,0)
+ 
+        for i in range(40,48): # 6th row = idle timeout indicator
+            x = i-40
+            if x <= idle_leds:
+                c = int(255 * (x/8))
+                pixels[i] = (c, 255-c, 0)
+            else:
+                pixels[i] = (0,0,0)
+
+        if not robotstatusblinky:
+            pixels[63] = (0,128,0)
+            robotstatusblinky = True
+        else:
+            pixels[63] = (0,0,128)
+            robotstatusblinky = False
+                          
     if not connected and not connecting:
         pixels = []
         for i in range(0,64):
@@ -447,7 +468,7 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
 
 
 def joystickthread():
-    global last_activity, joystick_mode, current_lift, current_head_tilt
+    global last_activity, joystick_mode, current_lift, current_head_tilt, joystick_speed
     while True:
         event = sense.stick.wait_for_event()
         last_activity = time.time()
@@ -485,16 +506,33 @@ def joystickthread():
             print("setting head angle to %0.2f" % angle)
             server.cozmoclient.set_head_angle(angle)
 
-            
-        if joystick_mode == JoystickModes.Drive:
+        if joystick_mode == JoystickModes.Speed:
             if event.direction == "up":
-                server.cozmoclient.drive_wheels(lwheel_speed=50, rwheel_speed = 50, duration=0.3)
+                joystick_speed = joystick_speed + 1
+                if joystick_speed > 8:
+                    joystick_speed = 8
             if event.direction == "down":
-                server.cozmoclient.drive_wheels(lwheel_speed=-50, rwheel_speed = -50, duration=0.3)
+                joystick_speed = joystick_speed - 1
+                if joystick_speed < 1:
+                    joystick_speed = 1
+
+            print("new speed: %d" % joystick_speed)
+        
+        if joystick_mode == JoystickModes.Drive:
+
+            # picked speed increments 1/8 = 0,125 = 1 per pixel on an 8 pixel sense grid row
+            speed_fraction = joystick_speed * 0.125
+            speed = 100 * speed_fraction
+
+            
+            if event.direction == "up":
+                server.cozmoclient.drive_wheels(lwheel_speed=speed, rwheel_speed = speed, duration=0.3)
+            if event.direction == "down":
+                server.cozmoclient.drive_wheels(lwheel_speed=-speed, rwheel_speed = -speed, duration=0.3)
             if event.direction == "left":
-                server.cozmoclient.drive_wheels(lwheel_speed=-50, rwheel_speed = 50, duration=0.3)
+                server.cozmoclient.drive_wheels(lwheel_speed=-speed, rwheel_speed = speed, duration=0.3)
             if event.direction == "right":
-                server.cozmoclient.drive_wheels(lwheel_speed=50, rwheel_speed = -50, duration=0.3)
+                server.cozmoclient.drive_wheels(lwheel_speed=speed, rwheel_speed = -speed, duration=0.3)
 
         if joystick_mode == JoystickModes.Lift:
             if event.direction == "up":
@@ -527,6 +565,12 @@ def setupRobot():
     disconnecting = False
 
     try:
+        print("cutting power to robot")
+        requests.post('http://localhost:3001/button-robotbutton', data = {'event':'double-click'})
+        sleep(2)
+        print("turning power back on")
+        requests.post('http://localhost:3001/button-robotbutton', data = {'event':'click'})
+        
         cli = pycozmo.client.Client()
         cli.start()
         print("connecting")
