@@ -21,7 +21,7 @@ from enum import Enum
 import requests
 from http.server import BaseHTTPRequestHandler,HTTPServer
 
-JoystickModes = Enum("JoystickModes", "Drive Speed Lift HeadTilt")
+JoystickModes = Enum("JoystickModes", "Drive Speed Lift HeadTilt SpheroDrive")
 
 sense = SenseHat()
 sense.set_rotation(180)
@@ -47,6 +47,10 @@ address = ('', 4443)
 framecount = 0
 watchdog_robot_timeout = 20
 disconnecting = False
+sphero_server = "http://The-Otter.local:4444/"
+sphero_attached = False
+sphero_attaching = False
+sphero_heading = 0
 
 PAGE="""\
 <html>
@@ -404,7 +408,7 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
         pixels[0] = (0,64,0)
     else: # connected, idle timeout handler and status blinkies
 
-        timeout = 10.0
+        timeout = 300.0
         idle = time.time() - last_activity
         if idle >= timeout and not disconnecting:
             print("idle disconnect")
@@ -449,6 +453,13 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
             else:
                 pixels[i] = (0,0,0)
 
+        if sphero_attached:
+            pixels[62] = (0,128,0)
+        elif sphero_attaching:
+            pixels[62] = (128,128,0)
+        else:
+            pixels[62] = (128,0,0)
+
         if not robotstatusblinky:
             pixels[63] = (0,128,0)
             robotstatusblinky = True
@@ -468,7 +479,8 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
 
 
 def joystickthread():
-    global last_activity, joystick_mode, current_lift, current_head_tilt, joystick_speed
+    global last_activity, joystick_mode, current_lift, current_head_tilt, joystick_speed, server
+    global sphero_server, sphero_attached, sphero_attaching, sphero_heading, sphero_speed
     while True:
         event = sense.stick.wait_for_event()
         last_activity = time.time()
@@ -477,7 +489,8 @@ def joystickthread():
             continue
 
         if not setupRobot():
-            exit(2)
+            server.shutdown()
+            return
 
         if event.direction == "middle":
             modes = list(JoystickModes)
@@ -516,13 +529,18 @@ def joystickthread():
                 if joystick_speed < 1:
                     joystick_speed = 1
 
+            if joystick_speed > 5:
+                sphero_speed = 1
+            else:
+                sphero_speed = 2
+                    
             print("new speed: %d" % joystick_speed)
         
         if joystick_mode == JoystickModes.Drive:
 
             # picked speed increments 1/8 = 0,125 = 1 per pixel on an 8 pixel sense grid row
             speed_fraction = joystick_speed * 0.125
-            speed = 100 * speed_fraction
+            speed = 300 * speed_fraction
 
             
             if event.direction == "up":
@@ -549,7 +567,48 @@ def joystickthread():
             height = (current_lift * (pycozmo.MAX_LIFT_HEIGHT.mm - pycozmo.MIN_LIFT_HEIGHT.mm)) + pycozmo.MIN_LIFT_HEIGHT.mm;
             server.cozmoclient.set_lift_height(height=height)
 
+        if joystick_mode == JoystickModes.SpheroDrive:
+            if not sphero_attached:
+                sphero_attaching = True
+                req = requests.post(sphero_server + "attach", data = '{"uuid":"4165358f6b8a4fbbbe10f7e4dd1e2408"}');
+                if req.status_code == 200:
+                    sphero_attached = True
+                    sphero_attaching = False
+                else:
+                    sphero_attached = False
+                    sphero_attaching = True
+
+            else:
+                driveParams = {};
+                if event.direction == "up":
+                    sphero_heading = 0
+                    if (sphero_speed < 0):
+                        sphero_speed = abs(sphero_speed)
+                if event.direction == "down":
+                    if (sphero_speed > 0):
+                        sphero_speed = -sphero_speed
+
+                    sphero_heading = 0;
+                if event.direction == "left":
+                    sphero_heading = -1
+                if event.direction == "right":
+                    sphero_heading = 1
+                    
+                driveParams["speed"] = sphero_speed
+                driveParams["heading"] = sphero_heading
+                
+                requests.post(sphero_server + "drive", json.dumps(driveParams))
+
 connectLock = Lock()
+
+def powerCycleCozmoCharger():
+    print("cutting power to robot")
+    requests.post('http://localhost:3001/button-robotbutton', data = {'event':'double-click'})
+    sleep(2)
+    print("turning power back on")
+    requests.post('http://localhost:3001/button-robotbutton', data = {'event':'click'})
+        
+    
 
 def setupRobot():
     global connecting, connected, disconnecting
@@ -565,12 +624,6 @@ def setupRobot():
     disconnecting = False
 
     try:
-        print("cutting power to robot")
-        requests.post('http://localhost:3001/button-robotbutton', data = {'event':'double-click'})
-        sleep(2)
-        print("turning power back on")
-        requests.post('http://localhost:3001/button-robotbutton', data = {'event':'click'})
-        
         cli = pycozmo.client.Client()
         cli.start()
         print("connecting")
@@ -603,6 +656,7 @@ def setupRobot():
         connectLock.release()
         print("failed to connect! " + str(e))
         connecting = False
+        powerCycleCozmoCharger()
         return False
 
 def run():
