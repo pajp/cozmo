@@ -134,8 +134,7 @@ class StreamingHandler(BaseHTTPRequestHandler):
         global connected
         global last_activity
         if not setupRobot():
-            self.send_error(500, "No robot :-(")
-            self.server.shutdown()
+            self.send_error(503, "No robot :-(", "Unable to connect to Cozmo. I'll try to wake Cozmo up, please try again in a minute.")
             return
 
         contentlength = self.headers['Content-Length']
@@ -212,8 +211,7 @@ class StreamingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         global last_activity
         if not setupRobot():
-            self.send_error(500, "No robot :-(")
-            self.server.shutdown()
+            self.send_error(503, "No robot :-(", "Unable to connect to Cozmo. I'll try to wake Cozmo up, please try again in a minute.")
             return
 
         if self.path == '/':
@@ -333,7 +331,7 @@ def camera_handler_setup():
 
 def watchdog():
     global disconnecting
-    if hasattr(server.robotstatusdict, "client_timestamp"):
+    if hasattr(server, "robotstatusdict") and hasattr(server.robotstatusdict, "client_timestamp"):
         last_status_report = server.robotstatusdict["client_timestamp"]
         time_since_last_report = time.time() - last_status_report
         if time_since_last_report > watchdog_robot_timeout:
@@ -341,6 +339,9 @@ def watchdog():
             server.cozmoclient.disconnect()
             disconnecting = False
             quit()
+        else:
+            print("No robot status dict on server object - robot hasn't connected since startup")
+            
     t = Timer(10, watchdog)
     t.start()
 
@@ -350,7 +351,8 @@ def on_camera_image(cli, image):
     framecount = framecount + 1
     image.save(output, "png")
 
-    server.robotstatusdict["last_image_acquisition"] = time.time()
+    if hasattr(server, "robotstatusdict"):
+        server.robotstatusdict["last_image_acquisition"] = time.time()
 
     if one_shot_camera and output.clientCount > 0:
         t = Timer(one_shot_spf, camera_handler_setup)
@@ -363,7 +365,78 @@ def on_robot_charging(cli, state):
         server.robotcharging = 1
     else:
         print("Stopped charging.")
-        server.robotcharging = 0        
+        server.robotcharging = 0
+
+def update_led(cozmoblinky, cozmostatus):
+    pixels = []
+    global connected, disconnecting
+    for i in range(0,64):
+        pixels.append((0,0,0))
+
+    if True: # connected, idle timeout handler and status blinkies
+
+        timeout = 300.0
+        idle = time.time() - last_activity
+        if idle >= timeout and not disconnecting:
+            print("idle disconnect")
+            disconnecting = True
+            server.cozmoclient.disconnect()
+            server.cozmoclient = None
+            connected = False
+
+        
+        for i in range(0,16): # 16 status bits
+            if cozmostatus != 0 and cozmostatus & (1 << i):
+                pixels[i] = (0,0,126)
+            else:
+                pixels[i] = (128,128,128)
+
+        for i in range(16,24): # 3rd row = number of streaming clients
+            if i-16 >= output.clientCount:
+                pixels[i] = (0,0,0)
+            else:
+                pixels[i] = (128,0,0)
+
+        for i in range(24,32): # 4th row = joystick mode indicator
+            if i-23 == joystick_mode.value:
+                pixels[i] = (0,128,0)
+            else:
+                pixels[i] = (0,0,0)
+            
+        for i in range(32,40): # 5th row = speed indicator
+            if i-31 <= joystick_speed:
+                pixels[i] = (128,128,0)
+            else:
+                pixels[i] = (0,0,0)
+
+        # 6th row = idle timeout indicator
+        idle_fraction = idle / timeout
+        idle_leds = 8 * idle_fraction
+
+        for i in range(40,48):
+            x = i-40
+            if x <= idle_leds:
+                c = int(255 * (x/8))
+                pixels[i] = (c, 255-c, 0)
+            else:
+                pixels[i] = (0,0,0)
+
+        if sphero_attached:
+            pixels[62] = (0,128,0)
+        elif sphero_attaching:
+            pixels[62] = (128,128,0)
+        else:
+            pixels[62] = (128,0,0)
+
+        if not connected:
+            pixels[63] = (128,0,0)
+        else:
+            if not cozmoblinky:
+                pixels[63] = (0,128,0)
+            else:
+                pixels[63] = (0,0,128)
+
+    sense.set_pixels(pixels)
 
 def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
     #server.robotstatus = "B: {:.01f}V g x:{:.01f} y:{:.01f} z:{:.01f}".format(pkt.battery_voltage, pkt.gyro_x, pkt.gyro_y, pkt.gyro_z)
@@ -393,104 +466,52 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
     else:
         server.robotstatusdict = newdict
 
-    pixels = []
     global robotstatusblinky
-    global connected, disconnecting
-    for i in range(0,64):
-        pixels.append((0,0,0))
-
-    # errors
-    if disconnecting:
-        pixels[0] = (64,64,0)
-    elif not connected:
-        pixels[0] = (32,0,0)
-    elif connecting:
-        pixels[0] = (0,64,0)
-    else: # connected, idle timeout handler and status blinkies
-
-        timeout = 300.0
-        idle = time.time() - last_activity
-        if idle >= timeout and not disconnecting:
-            print("idle disconnect")
-            disconnecting = True
-            server.cozmoclient.disconnect()
-            server.cozmoclient = None
-            connected = False
-
-        idle_fraction = idle / timeout
-        idle_leds = 8 * idle_fraction
-        
-        
-        for i in range(0,16): # 16 status bits
-            if pkt.status & (1 << i):
-                pixels[i] = (0,0,126)
-            else:
-                pixels[i] = (128,128,128)
-
-        for i in range(16,24): # 3rd row = number of streaming clients
-            if i-16 >= output.clientCount:
-                pixels[i] = (0,0,0)
-            else:
-                pixels[i] = (128,0,0)
-
-        for i in range(24,32): # 4th row = joystick mode indicator
-            if i-23 == joystick_mode.value:
-                pixels[i] = (0,128,0)
-            else:
-                pixels[i] = (0,0,0)
-
-        for i in range(32,40): # 5th row = speed indicator
-            if i-31 <= joystick_speed:
-                pixels[i] = (128,128,0)
-            else:
-                pixels[i] = (0,0,0)
- 
-        for i in range(40,48): # 6th row = idle timeout indicator
-            x = i-40
-            if x <= idle_leds:
-                c = int(255 * (x/8))
-                pixels[i] = (c, 255-c, 0)
-            else:
-                pixels[i] = (0,0,0)
-
-        if sphero_attached:
-            pixels[62] = (0,128,0)
-        elif sphero_attaching:
-            pixels[62] = (128,128,0)
-        else:
-            pixels[62] = (128,0,0)
-
-        if not robotstatusblinky:
-            pixels[63] = (0,128,0)
-            robotstatusblinky = True
-        else:
-            pixels[63] = (0,0,128)
-            robotstatusblinky = False
-                          
-    if not connected and not connecting:
-        pixels = []
-        for i in range(0,64):
-            r = i
-            g = 0
-            b = 0
-            pixels.append((r, g, b))
-
-    sense.set_pixels(pixels)
+    robotstatusblinky = not robotstatusblinky
+    update_led(robotstatusblinky, pkt.status)
 
 
+last_held = 0.0
+hold_count = 0
 def joystickthread():
     global last_activity, joystick_mode, current_lift, current_head_tilt, joystick_speed, server
     global sphero_server, sphero_attached, sphero_attaching, sphero_heading, sphero_speed
+    global last_held, hold_count
+    global connected
     while True:
+        update_led(False, 0)
         event = sense.stick.wait_for_event()
         last_activity = time.time()
         print("Joystick: {} {} | mode: {}".format(event.action, event.direction, joystick_mode))
-        if event.action != "pressed":
-            continue
+        if event.action == "released":
+            if event.direction != "middle" and joystick_mode == JoystickModes.SpheroDrive:
+                print("stopping Sphero")
+                driveParams = {}
+                driveParams["speed"] = 0
+                driveParams["heading"] = 0
+                
+                requests.post(sphero_server + "drive", json.dumps(driveParams))
+                continue
+            else:
+                continue
 
-        if not setupRobot():
-            server.shutdown()
-            return
+        min_time_between_holds = 0.4
+        if joystick_mode == JoystickModes.SpheroDrive:
+            throttle_limit = 2
+
+        if event.action == "held":
+            time_since_last_held = time.time() - last_held
+            print("hold throttle: time since last hold: {}, hould_count: {}".format(time_since_last_held, hold_count))
+            
+            if time_since_last_held < min_time_between_holds:
+                print("ignoring hold {}s since last hold ({})".format(time_since_last_held, last_held))
+                continue
+            last_held = time.time()
+
+
+        if joystick_mode == JoystickModes.Drive:
+            if not setupRobot():
+                print("robot setup failed")
 
         if event.direction == "middle":
             modes = list(JoystickModes)
@@ -501,7 +522,7 @@ def joystickthread():
             joystick_mode = modes[new_mode]
             print("New joystick mode is {}".format(joystick_mode))
 
-        if joystick_mode == JoystickModes.HeadTilt:
+        if connected and joystick_mode == JoystickModes.HeadTilt:
             if event.direction == "up":
                 current_head_tilt = current_head_tilt + 0.1
 
@@ -536,7 +557,7 @@ def joystickthread():
                     
             print("new speed: %d" % joystick_speed)
         
-        if joystick_mode == JoystickModes.Drive:
+        if connected and joystick_mode == JoystickModes.Drive:
 
             # picked speed increments 1/8 = 0,125 = 1 per pixel on an 8 pixel sense grid row
             speed_fraction = joystick_speed * 0.125
@@ -552,7 +573,7 @@ def joystickthread():
             if event.direction == "right":
                 server.cozmoclient.drive_wheels(lwheel_speed=speed, rwheel_speed = -speed, duration=0.3)
 
-        if joystick_mode == JoystickModes.Lift:
+        if connected and joystick_mode == JoystickModes.Lift:
             if event.direction == "up":
                 current_lift = current_lift + 0.1
 
@@ -661,8 +682,6 @@ def setupRobot():
 
 def run():
     global connected
-    if not setupRobot():
-        exit(2)
 
     timer = Timer(10, watchdog)
     timer.setDaemon(True)
@@ -671,6 +690,7 @@ def run():
     joysticker.setDaemon(True)
     joysticker.start()
     try:
+        print("web server listening on " + address[0] + ":" + str(address[1]))
         server.serve_forever()
     finally:
         print("goodbye")
