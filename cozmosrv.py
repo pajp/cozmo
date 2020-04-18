@@ -630,7 +630,11 @@ def joystickthread():
         if joystick_mode == JoystickModes.SpheroDrive:
             if sphero_attached != sphero_index:
                 sphero_attaching = True
-                device = sphero_devices[sphero_index]
+                sd = sphero_devices.copy()
+                if sphero_index > len(sd)-1:
+                    sphero_index = len(sd)-1
+
+                device = sd[sphero_index]
                 uuid = device["uuid"]
                 print("attaching device: {}…".format(device))
                 data = json.dumps({"uuid": uuid, "disconnectOthers" : True})
