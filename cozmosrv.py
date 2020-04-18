@@ -21,7 +21,7 @@ from enum import Enum
 import requests
 from http.server import BaseHTTPRequestHandler,HTTPServer
 
-JoystickModes = Enum("JoystickModes", "Drive Speed Lift HeadTilt SpheroDrive")
+JoystickModes = Enum("JoystickModes", "Drive Speed Lift HeadTilt SpheroSelect SpheroDrive")
 
 sense = SenseHat()
 sense.set_rotation(180)
@@ -48,9 +48,11 @@ framecount = 0
 watchdog_robot_timeout = 20
 disconnecting = False
 sphero_server = "http://The-Otter.local:4444/"
-sphero_attached = False
+sphero_index = 0
+sphero_attached = -1
 sphero_attaching = False
 sphero_heading = 0
+sphero_devices = []
 
 PAGE="""\
 <html>
@@ -370,6 +372,7 @@ def on_robot_charging(cli, state):
 def update_led(cozmoblinky, cozmostatus):
     pixels = []
     global connected, disconnecting
+    global sphero_devices, sphero_index, sphero_blinky
     for i in range(0,64):
         pixels.append((0,0,0))
 
@@ -377,7 +380,7 @@ def update_led(cozmoblinky, cozmostatus):
 
         timeout = 300.0
         idle = time.time() - last_activity
-        if idle >= timeout and not disconnecting:
+        if connected and idle >= timeout and not disconnecting:
             print("idle disconnect")
             disconnecting = True
             server.cozmoclient.disconnect()
@@ -421,7 +424,22 @@ def update_led(cozmoblinky, cozmostatus):
             else:
                 pixels[i] = (0,0,0)
 
-        if sphero_attached:
+        # 7th row = sphero device indicator
+        sd = sphero_devices.copy()
+        for i in range(0,len(sd)):
+            pxl = 48+i
+            if sphero_blinky and sphero_index == i:
+                pixels[pxl] = (255, 255, 255)
+            elif sd[i]["name"].startswith("Lightning"):
+                pixels[pxl] = (255, 0, 0)
+            elif sd[i]["name"].startswith("R2"):
+                pixels[pxl] = (0, 0, 255)
+            elif sd[i]["name"].startswith("BB"):
+                pixels[pxl] = (255, 255, 0)
+            else:
+                print("Unknown Sphero bot at index {}".format(i))
+
+        if sphero_attached != -1:
             pixels[62] = (0,128,0)
         elif sphero_attaching:
             pixels[62] = (128,128,0)
@@ -475,7 +493,7 @@ last_held = 0.0
 hold_count = 0
 def joystickthread():
     global last_activity, joystick_mode, current_lift, current_head_tilt, joystick_speed, server
-    global sphero_server, sphero_attached, sphero_attaching, sphero_heading, sphero_speed
+    global sphero_server, sphero_attached, sphero_attaching, sphero_heading, sphero_speed, sphero_index
     global last_held, hold_count
     global connected
     while True:
@@ -521,6 +539,27 @@ def joystickthread():
 
             joystick_mode = modes[new_mode]
             print("New joystick mode is {}".format(joystick_mode))
+
+            if joystick_mode == JoystickModes.SpheroSelect:
+                backgroundSpheroScan()
+                continue
+
+        if joystick_mode == JoystickModes.SpheroSelect:
+            if event.direction == "right":
+                sphero_index = sphero_index + 1
+                if sphero_index > len(sphero_devices)-1:
+                    sphero_index = 0
+
+            if event.direction == "left":
+                sphero_index = sphero_index - 1
+                if sphero_index < 0:
+                    sphero_index = len(sphero_devices)-1
+
+            if len(sphero_devices) > 0:
+                print("sphero index: {}, device: {}".format(sphero_index, sphero_devices[sphero_index]))
+            else:
+                print("sphero index: {}, no devices".format(sphero_index))
+            
 
         if connected and joystick_mode == JoystickModes.HeadTilt:
             if event.direction == "up":
@@ -589,15 +628,21 @@ def joystickthread():
             server.cozmoclient.set_lift_height(height=height)
 
         if joystick_mode == JoystickModes.SpheroDrive:
-            if not sphero_attached:
+            if sphero_attached != sphero_index:
                 sphero_attaching = True
-                req = requests.post(sphero_server + "attach", data = '{"uuid":"4165358f6b8a4fbbbe10f7e4dd1e2408"}');
+                device = sphero_devices[sphero_index]
+                uuid = device["uuid"]
+                print("attaching device: {}…".format(device))
+                data = json.dumps({"uuid": uuid, "disconnectOthers" : True})
+                req = requests.post(sphero_server + "attach", data = data);
                 if req.status_code == 200:
-                    sphero_attached = True
+                    sphero_attached = sphero_index
                     sphero_attaching = False
+                    print("ok")
                 else:
-                    sphero_attached = False
+                    sphero_attached = -1
                     sphero_attaching = True
+                    print("failed")
 
             else:
                 driveParams = {};
@@ -680,6 +725,35 @@ def setupRobot():
         powerCycleCozmoCharger()
         return False
 
+sphero_blinky = True
+def spheroBlinkThread():
+    global sphero_blinky
+    while True:
+        sleep(0.2)
+        sphero_blinky = not sphero_blinky
+
+def displayThread():
+    while True:
+        update_led(False, 0)
+        sleep(0.1)
+        
+        
+def backgroundSpheroScan():
+    spheroscanner = Thread(target=spheroScan)
+    spheroscanner.setDaemon(True)
+    spheroscanner.start()    
+    
+def spheroScan():
+    global sphero_devices
+    print("scanning for Sphero devices...")
+    res = requests.post(sphero_server + "scan", data = '');
+    if res.status_code == 200:
+        spheroes = json.loads(res.content)
+        print("got scan response: {}".format(spheroes))
+        sphero_devices = sorted(spheroes, key=lambda device: device["name"])
+        update_led(False, 0)
+        
+
 def run():
     global connected
 
@@ -689,6 +763,18 @@ def run():
     joysticker = Thread(target=joystickthread)
     joysticker.setDaemon(True)
     joysticker.start()
+
+    blinkThread = Thread(target=spheroBlinkThread)
+    blinkThread.setDaemon(True)
+    blinkThread.start()
+
+    uiThread = Thread(target=displayThread)
+    uiThread.setDaemon(True)
+    uiThread.start()
+    
+    #spheroscanner = Thread(target=spheroScanThread)
+    #spheroscanner.setDaemon(True)
+    #spheroscanner.start()
     try:
         print("web server listening on " + address[0] + ":" + str(address[1]))
         server.serve_forever()
