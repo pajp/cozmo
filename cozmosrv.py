@@ -24,9 +24,10 @@ from http.server import BaseHTTPRequestHandler,HTTPServer
 JoystickModes = Enum("JoystickModes", "Drive Speed Lift HeadTilt SpheroSelect SpheroDrive")
 
 sense = SenseHat()
-sense.set_rotation(180)
+sense.set_rotation(0)
 pixels = []
 pixelon = True
+
 for i in range(0, 64):
     fract = i/64
     cf = int(255 * fract)
@@ -46,13 +47,14 @@ current_head_tilt = 0.0
 address = ('', 4443)
 framecount = 0
 watchdog_robot_timeout = 20
-#timeout = 300.0
-timeout = 10
+timeout = 120.0
+#timeout = 10
 idle = 0
 disconnecting = False
 sphero_server = "http://The-Otter.local:4444/"
 sphero_index = 0
-sphero_attached = -1
+sphero_uuid = None
+sphero_attached = None
 sphero_attaching = False
 sphero_heading = 0
 sphero_devices = []
@@ -355,7 +357,6 @@ def user_idle_watchdog():
         sleep(1)
 
 def watchdog():
-    print("robot idle watchdog running")
     global disconnecting
     if hasattr(server, "robotstatusdict") and hasattr(server.robotstatusdict, "client_timestamp"):
         last_status_report = server.robotstatusdict["client_timestamp"]
@@ -396,7 +397,7 @@ def on_robot_charging(cli, state):
 def update_led():
     global connected, disconnecting, idle
     global cozmoblinky
-    global sphero_devices, sphero_index, sphero_blinky
+    global sphero_devices, sphero_index, sphero_blinky, sphero_uuid
     global led_brightness
     global pixels
     old_pixels = pixels.copy()
@@ -455,7 +456,9 @@ def update_led():
     sd = sphero_devices.copy()
     for i in range(0,len(sd)):
         pxl = 48+i
-        if sphero_blinky and sphero_index == i:
+        #print("comparing uuid {} with selected uuid {}".format(sphero_devices[i]["uuid"], sphero_uuid))
+        if sphero_blinky and sphero_devices[i]["uuid"] == sphero_uuid:
+            sphero_index = i
             pixels[pxl] = (255, 255, 255)
         elif sd[i]["name"].startswith("Lightning"):
             pixels[pxl] = (255, 0, 0)
@@ -466,7 +469,7 @@ def update_led():
         else:
             print("Unknown Sphero bot at index {}".format(i))
 
-    if sphero_attached != -1:
+    if sphero_attached != None:
         pixels[62] = (0,128,0)
     elif sphero_attaching:
         pixels[62] = (128,128,0)
@@ -525,7 +528,7 @@ last_held = 0.0
 hold_count = 0
 def joystickthread():
     global last_activity, joystick_mode, current_lift, current_head_tilt, joystick_speed, server
-    global sphero_server, sphero_attached, sphero_attaching, sphero_heading, sphero_speed, sphero_index
+    global sphero_server, sphero_attached, sphero_attaching, sphero_heading, sphero_speed, sphero_index, sphero_uuid
     global last_held, hold_count
     global connected
     while True:
@@ -585,6 +588,8 @@ def joystickthread():
                 sphero_index = sphero_index - 1
                 if sphero_index < 0:
                     sphero_index = len(sphero_devices)-1
+
+            sphero_uuid = sphero_devices[sphero_index]["uuid"]
 
             if len(sphero_devices) > 0:
                 print("sphero index: {}, device: {}".format(sphero_index, sphero_devices[sphero_index]))
@@ -659,7 +664,7 @@ def joystickthread():
             server.cozmoclient.set_lift_height(height=height)
 
         if joystick_mode == JoystickModes.SpheroDrive:
-            if sphero_attached != sphero_index:
+            if len(sphero_devices) > 0 and sphero_attached != sphero_uuid:
                 sphero_attaching = True
                 sd = sphero_devices.copy()
                 if sphero_index > len(sd)-1:
@@ -671,11 +676,11 @@ def joystickthread():
                 data = json.dumps({"uuid": uuid, "disconnectOthers" : True})
                 req = requests.post(sphero_server + "attach", data = data);
                 if req.status_code == 200:
-                    sphero_attached = sphero_index
+                    sphero_attached = sphero_uuid
                     sphero_attaching = False
                     print("ok")
                 else:
-                    sphero_attached = -1
+                    sphero_attached = None
                     sphero_attaching = True
                     print("failed")
 
@@ -780,12 +785,14 @@ def backgroundSpheroScan():
     
 def spheroScan():
     global sphero_devices
+    sphero_devices = []
     print("scanning for Sphero devices...")
     res = requests.post(sphero_server + "scan", data = '');
     if res.status_code == 200:
         spheroes = json.loads(res.content)
         print("got scan response: {}".format(spheroes))
         sphero_devices = sorted(spheroes, key=lambda device: device["name"])
+        sphero_index = 0
         
 
 def run():
