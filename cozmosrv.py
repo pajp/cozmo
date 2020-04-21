@@ -57,6 +57,7 @@ sphero_attaching = False
 sphero_heading = 0
 sphero_devices = []
 cozmoblinky = False
+led_brightness = 1.0
 
 PAGE="""\
 <html>
@@ -393,88 +394,100 @@ def on_robot_charging(cli, state):
         server.robotcharging = 0
 
 def update_led():
-    pixels = []
     global connected, disconnecting, idle
     global cozmoblinky
     global sphero_devices, sphero_index, sphero_blinky
+    global led_brightness
+    global pixels
+    old_pixels = pixels.copy()
+    pixels = []    
     for i in range(0,64):
         pixels.append((0,0,0))
 
     if idle > timeout:
-        sense.set_pixels(pixels)
-        return
+        led_brightness = 0.4
+    else:
+        led_brightness = 1.0
 
-    else: # connected, idle timeout handler and status blinkies
-
-        if hasattr(server, 'robotstatusdict'):
-            cozmostatus = server.robotstatusdict['status']
-            for i in range(0,16): # 16 status bits
-                if cozmostatus & (1 << i):
-                    pixels[i] = (0,0,126)
-                else:
-                    pixels[i] = (128,128,128)
-
-        for i in range(16,24): # 3rd row = number of streaming clients
-            if i-16 >= output.clientCount:
-                pixels[i] = (0,0,0)
+    # first two rows = status bits from Cozmo status packet
+    if hasattr(server, 'robotstatusdict') and connected:
+        cozmostatus = server.robotstatusdict['status']
+        for i in range(0,16): # 16 status bits
+            if cozmostatus & (1 << i):
+                pixels[i] = (0,0,126)
             else:
-                pixels[i] = (128,0,0)
+                pixels[i] = (128,128,128)
 
-        for i in range(24,32): # 4th row = joystick mode indicator
-            if i-23 == joystick_mode.value:
-                pixels[i] = (0,128,0)
-            else:
-                pixels[i] = (0,0,0)
-            
-        for i in range(32,40): # 5th row = speed indicator
-            if i-31 <= joystick_speed:
-                pixels[i] = (128,128,0)
-            else:
-                pixels[i] = (0,0,0)
+    for i in range(16,24): # 3rd row = number of streaming clients
+        if i-16 >= output.clientCount:
+            pixels[i] = (0,0,0)
+        else:
+            pixels[i] = (128,0,0)
 
-        # 6th row = idle timeout indicator
-        idle_fraction = idle / timeout
-        idle_leds = 8 * idle_fraction
+    for i in range(24,32): # 4th row = joystick mode indicator
+        if i-23 == joystick_mode.value:
+            pixels[i] = (0,128,0)
+        else:
+            pixels[i] = (0,0,0)
 
-        for i in range(40,48):
+    for i in range(32,40): # 5th row = speed indicator
+        if i-31 <= joystick_speed:
+            pixels[i] = (128,128,0)
+        else:
+            pixels[i] = (0,0,0)
+
+    # 6th row = idle timeout indicator
+    idle_fraction = idle / timeout
+    idle_leds = 8 * idle_fraction
+
+    for i in range(40,48):
+        if idle < timeout:
             x = i-40
             if x <= idle_leds:
                 c = int(255 * (x/8))
                 pixels[i] = (c, 255-c, 0)
             else:
                 pixels[i] = (0,0,0)
-
-        # 7th row = sphero device indicator
-        sd = sphero_devices.copy()
-        for i in range(0,len(sd)):
-            pxl = 48+i
-            if sphero_blinky and sphero_index == i:
-                pixels[pxl] = (255, 255, 255)
-            elif sd[i]["name"].startswith("Lightning"):
-                pixels[pxl] = (255, 0, 0)
-            elif sd[i]["name"].startswith("R2"):
-                pixels[pxl] = (0, 0, 255)
-            elif sd[i]["name"].startswith("BB"):
-                pixels[pxl] = (255, 255, 0)
-            else:
-                print("Unknown Sphero bot at index {}".format(i))
-
-        if sphero_attached != -1:
-            pixels[62] = (0,128,0)
-        elif sphero_attaching:
-            pixels[62] = (128,128,0)
         else:
-            pixels[62] = (128,0,0)
+            pixels[i] = (128,0,0)
 
-        if not connected:
-            pixels[63] = (128,0,0)
+    # 7th row = sphero device indicator
+    sd = sphero_devices.copy()
+    for i in range(0,len(sd)):
+        pxl = 48+i
+        if sphero_blinky and sphero_index == i:
+            pixels[pxl] = (255, 255, 255)
+        elif sd[i]["name"].startswith("Lightning"):
+            pixels[pxl] = (255, 0, 0)
+        elif sd[i]["name"].startswith("R2"):
+            pixels[pxl] = (0, 0, 255)
+        elif sd[i]["name"].startswith("BB"):
+            pixels[pxl] = (255, 255, 0)
         else:
-            if not cozmoblinky:
-                pixels[63] = (0,128,0)
-            else:
-                pixels[63] = (0,0,128)
+            print("Unknown Sphero bot at index {}".format(i))
 
-    sense.set_pixels(pixels)
+    if sphero_attached != -1:
+        pixels[62] = (0,128,0)
+    elif sphero_attaching:
+        pixels[62] = (128,128,0)
+    else:
+        pixels[62] = (128,0,0)
+
+    if not connected:
+        pixels[63] = (128,0,0)
+    else:
+        if not cozmoblinky:
+            pixels[63] = (0,128,0)
+        else: pixels[63] = (0,0,128)
+
+    for i in range(0,len(pixels)):
+        r = int(float(pixels[i][0]) * led_brightness)
+        g = int(float(pixels[i][1]) * led_brightness)
+        b = int(float(pixels[i][2]) * led_brightness)
+        pixels[i] = (r, g, b)
+
+    if old_pixels != pixels:
+        sense.set_pixels(pixels)
 
 def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
     #server.robotstatus = "B: {:.01f}V g x:{:.01f} y:{:.01f} z:{:.01f}".format(pkt.battery_voltage, pkt.gyro_x, pkt.gyro_y, pkt.gyro_z)
