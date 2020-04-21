@@ -46,6 +46,9 @@ current_head_tilt = 0.0
 address = ('', 4443)
 framecount = 0
 watchdog_robot_timeout = 20
+#timeout = 300.0
+timeout = 10
+idle = 0
 disconnecting = False
 sphero_server = "http://The-Otter.local:4444/"
 sphero_index = 0
@@ -53,6 +56,7 @@ sphero_attached = -1
 sphero_attaching = False
 sphero_heading = 0
 sphero_devices = []
+cozmoblinky = False
 
 PAGE="""\
 <html>
@@ -212,6 +216,7 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 
     def do_GET(self):
         global last_activity
+        last_activity = time.time()
         if not setupRobot():
             self.send_error(503, "No robot :-(", "Unable to connect to Cozmo. I'll try to wake Cozmo up, please try again in a minute.")
             return
@@ -228,14 +233,18 @@ class StreamingHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(content)
         elif self.path == '/status':
-            jsonstr = json.dumps(self.server.robotstatusdict)
-            jsonbytes = jsonstr.encode('utf-8')
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/json; charset=utf-8')
-            self.send_header('Content-Length', len(jsonbytes))
-            self.end_headers()
-            self.wfile.write(jsonbytes)
-            last_activity = time.time()
+            if hasattr(self.server, 'robotstatusdict'):
+                jsonstr = json.dumps(self.server.robotstatusdict)
+                jsonbytes = jsonstr.encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/json; charset=utf-8')
+                self.send_header('Content-Length', len(jsonbytes))
+                self.end_headers()
+                self.wfile.write(jsonbytes)
+            else:
+                self.send_error(404)
+                self.end_headers()
+
         elif self.path == '/stream.mjpg':
             output.retain()
             self.send_response(200)
@@ -304,7 +313,6 @@ class StreamingHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(frame)
                     self.wfile.write(b'\r\n')
-                    last_activity = time.time()
 
             except Exception as e:
                 traceback.print_exc()
@@ -331,7 +339,22 @@ def camera_handler_setup():
         print("no Cozmo, not adding camera handler")
     connectLock.release()
 
+def user_idle_watchdog():
+    global idle, connected, disconnecting, last_activity
+    print("user idle watchdog running")
+    while True:
+        idle = time.time() - last_activity
+        if connected and idle >= timeout and not disconnecting:
+            print("idle disconnect")
+            disconnecting = True
+            server.cozmoclient.disconnect()
+            server.cozmoclient = None
+            connected = False
+
+        sleep(1)
+
 def watchdog():
+    print("robot idle watchdog running")
     global disconnecting
     if hasattr(server, "robotstatusdict") and hasattr(server.robotstatusdict, "client_timestamp"):
         last_status_report = server.robotstatusdict["client_timestamp"]
@@ -369,30 +392,27 @@ def on_robot_charging(cli, state):
         print("Stopped charging.")
         server.robotcharging = 0
 
-def update_led(cozmoblinky, cozmostatus):
+def update_led():
     pixels = []
-    global connected, disconnecting
+    global connected, disconnecting, idle
+    global cozmoblinky
     global sphero_devices, sphero_index, sphero_blinky
     for i in range(0,64):
         pixels.append((0,0,0))
 
-    if True: # connected, idle timeout handler and status blinkies
+    if idle > timeout:
+        sense.set_pixels(pixels)
+        return
 
-        timeout = 300.0
-        idle = time.time() - last_activity
-        if connected and idle >= timeout and not disconnecting:
-            print("idle disconnect")
-            disconnecting = True
-            server.cozmoclient.disconnect()
-            server.cozmoclient = None
-            connected = False
+    else: # connected, idle timeout handler and status blinkies
 
-        
-        for i in range(0,16): # 16 status bits
-            if cozmostatus != 0 and cozmostatus & (1 << i):
-                pixels[i] = (0,0,126)
-            else:
-                pixels[i] = (128,128,128)
+        if hasattr(server, 'robotstatusdict'):
+            cozmostatus = server.robotstatusdict['status']
+            for i in range(0,16): # 16 status bits
+                if cozmostatus & (1 << i):
+                    pixels[i] = (0,0,126)
+                else:
+                    pixels[i] = (128,128,128)
 
         for i in range(16,24): # 3rd row = number of streaming clients
             if i-16 >= output.clientCount:
@@ -484,9 +504,8 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
     else:
         server.robotstatusdict = newdict
 
-    global robotstatusblinky
-    robotstatusblinky = not robotstatusblinky
-    update_led(robotstatusblinky, pkt.status)
+    global cozmoblinky
+    cozmoblinky = not cozmoblinky
 
 
 last_held = 0.0
@@ -497,7 +516,6 @@ def joystickthread():
     global last_held, hold_count
     global connected
     while True:
-        update_led(False, 0)
         event = sense.stick.wait_for_event()
         last_activity = time.time()
         print("Joystick: {} {} | mode: {}".format(event.action, event.direction, joystick_mode))
@@ -738,7 +756,7 @@ def spheroBlinkThread():
 
 def displayThread():
     while True:
-        update_led(False, 0)
+        update_led()
         sleep(0.1)
         
         
@@ -755,7 +773,6 @@ def spheroScan():
         spheroes = json.loads(res.content)
         print("got scan response: {}".format(spheroes))
         sphero_devices = sorted(spheroes, key=lambda device: device["name"])
-        update_led(False, 0)
         
 
 def run():
@@ -764,6 +781,11 @@ def run():
     timer = Timer(10, watchdog)
     timer.setDaemon(True)
     timer.start()
+
+    useridletimer = Thread(target=user_idle_watchdog)
+    useridletimer.setDaemon(True)
+    useridletimer.start()
+    
     joysticker = Thread(target=joystickthread)
     joysticker.setDaemon(True)
     joysticker.start()
