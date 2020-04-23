@@ -14,6 +14,7 @@ import json
 import numpy as np
 import os
 import datetime as dt
+import random
 from time import sleep
 from sense_hat import SenseHat
 from threading import Thread
@@ -28,6 +29,22 @@ sense.set_rotation(0)
 pixels = []
 pixelon = True
 
+black = (0,0,0)
+red = (64,0,0)
+green = (0,255,0)
+blue = (0,0,255)
+_X = red
+_O = black
+exitscreen = [
+    _X, _O, _O, _O, _O, _O, _O, _X,
+    _O, _X, _O, _O, _O, _O, _X, _O,
+    _O, _O, _X, _O, _O, _X, _O, _O,
+    _O, _O, _O, _X, _X, _O, _O, _O,
+    _O, _O, _O, _X, _X, _O, _O, _O,
+    _O, _O, _X, _O, _O, _X, _O, _O,
+    _O, _X, _O, _O, _O, _O, _X, _O,
+    _X, _O, _O, _O, _O, _O, _O, _X ];    
+    
 for i in range(0, 64):
     fract = i/64
     cf = int(255 * fract)
@@ -58,6 +75,8 @@ sphero_attached = None
 sphero_attaching = False
 sphero_heading = 0
 sphero_devices = []
+sphero_scanning = False
+
 cozmoblinky = False
 led_brightness = 1.0
 
@@ -353,7 +372,11 @@ def user_idle_watchdog():
             server.cozmoclient.disconnect()
             server.cozmoclient = None
             connected = False
-
+            requests.post(sphero_server + "disconnectAll")
+            sphero_devices = []
+            sphero_attached = None
+            sphero_scanning = False
+            
         sleep(1)
 
 def watchdog():
@@ -454,20 +477,28 @@ def update_led():
 
     # 7th row = sphero device indicator
     sd = sphero_devices.copy()
-    for i in range(0,len(sd)):
-        pxl = 48+i
-        #print("comparing uuid {} with selected uuid {}".format(sphero_devices[i]["uuid"], sphero_uuid))
-        if sphero_blinky and sphero_devices[i]["uuid"] == sphero_uuid:
-            sphero_index = i
-            pixels[pxl] = (255, 255, 255)
-        elif sd[i]["name"].startswith("Lightning"):
-            pixels[pxl] = (255, 0, 0)
-        elif sd[i]["name"].startswith("R2"):
-            pixels[pxl] = (0, 0, 255)
-        elif sd[i]["name"].startswith("BB"):
-            pixels[pxl] = (255, 255, 0)
-        else:
-            print("Unknown Sphero bot at index {}".format(i))
+    if sphero_scanning:
+        for i in range(0,8):
+            r = random.randrange(255)
+            g = random.randrange(255)
+            b = random.randrange(255)
+            pixels[48+i] = (r, g, b)
+    else:
+        for i in range(0,len(sd)):
+            pxl = 48+i
+            #print("comparing uuid {} with selected uuid {}".format(sphero_devices[i]["uuid"], sphero_uuid))
+            
+            if sphero_blinky and sphero_devices[i]["uuid"] == sphero_uuid:
+                sphero_index = i
+                pixels[pxl] = (255, 255, 255)
+            elif sd[i]["name"].startswith("Lightning"):
+                pixels[pxl] = (255, 0, 0)
+            elif sd[i]["name"].startswith("R2"):
+                pixels[pxl] = (0, 0, 255)
+            elif sd[i]["name"].startswith("BB"):
+                pixels[pxl] = (255, 255, 0)
+            else:
+                print("Unknown Sphero bot at index {}".format(i))
 
     if sphero_attached != None:
         pixels[62] = (0,128,0)
@@ -476,12 +507,17 @@ def update_led():
     else:
         pixels[62] = (128,0,0)
 
-    if not connected:
-        pixels[63] = (128,0,0)
+    cozmopxl = (0,0,0)
+    if connecting:
+        cozmopxl = (255,255,0)
+    elif not connected:
+        cozmopxl = (255,0,0)
     else:
         if not cozmoblinky:
-            pixels[63] = (0,128,0)
-        else: pixels[63] = (0,0,128)
+            cozmopxl = (0,128,0)
+        else:
+            cozmopxl = (0,0,128)
+    pixels[63] = cozmopxl
 
     for i in range(0,len(pixels)):
         r = int(float(pixels[i][0]) * led_brightness)
@@ -562,8 +598,7 @@ def joystickthread():
 
 
         if joystick_mode == JoystickModes.Drive:
-            if not setupRobot():
-                print("robot setup failed")
+            setupRobotInBackground()
 
         if event.direction == "middle":
             modes = list(JoystickModes)
@@ -713,8 +748,11 @@ def powerCycleCozmoCharger():
     sleep(2)
     print("turning power back on")
     requests.post('http://localhost:3001/button-robotbutton', data = {'event':'click'})
-        
-    
+
+def setupRobotInBackground():
+    t = Thread(target=setupRobot)
+    t.setDaemon(True)
+    t.start()
 
 def setupRobot():
     global connecting, connected, disconnecting
@@ -784,15 +822,17 @@ def backgroundSpheroScan():
     spheroscanner.start()    
     
 def spheroScan():
-    global sphero_devices
+    global sphero_devices, sphero_scanning
     sphero_devices = []
+    sphero_scanning = True
     print("scanning for Sphero devices...")
     res = requests.post(sphero_server + "scan", data = '');
     if res.status_code == 200:
         spheroes = json.loads(res.content)
         print("got scan response: {}".format(spheroes))
         sphero_devices = sorted(spheroes, key=lambda device: device["name"])
-        sphero_index = 0
+        sphero_index = -1
+        sphero_scanning = False
         
 
 def run():
@@ -826,6 +866,8 @@ def run():
         server.serve_forever()
     finally:
         print("goodbye")
+        requests.post(sphero_server + "disconnectAll")
+        sense.set_pixels(exitscreen)
 
 
 output = StreamingOutput()
