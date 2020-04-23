@@ -574,11 +574,8 @@ def joystickthread():
         if event.action == "released":
             if event.direction != "middle" and joystick_mode == JoystickModes.SpheroDrive:
                 print("stopping Sphero")
-                driveParams = {}
-                driveParams["speed"] = 0
-                driveParams["heading"] = 0
                 
-                requests.post(sphero_server + "drive", json.dumps(driveParams))
+                requests.post(sphero_server + "stop")
                 continue
             else:
                 continue
@@ -737,7 +734,7 @@ def joystickthread():
                     
                 driveParams["speed"] = sphero_speed
                 driveParams["heading"] = sphero_heading
-                
+                print("drive: {}".format(driveParams))
                 requests.post(sphero_server + "drive", json.dumps(driveParams))
 
 connectLock = Lock()
