@@ -818,19 +818,32 @@ def backgroundSpheroScan():
     spheroscanner = Thread(target=spheroScan)
     spheroscanner.setDaemon(True)
     spheroscanner.start()    
+
+def noSphero():
+    sphero_scanning = False
+    sphero_index = -1
+    sphero_devices = []
+    sphero_attached = None
+    sphero_attaching = False
     
 def spheroScan():
     global sphero_devices, sphero_scanning, sphero_index
     sphero_devices = []
     sphero_scanning = True
     print("scanning for Sphero devices...")
-    res = requests.post(sphero_server + "scan", data = '');
-    if res.status_code == 200:
-        spheroes = json.loads(res.content)
-        print("got scan response: {}".format(spheroes))
-        sphero_devices = sorted(spheroes, key=lambda device: device["name"])
-        sphero_index = -1
-        sphero_scanning = False
+    try:
+        res = requests.post(sphero_server + "scan", data = '');
+        if res.status_code == 200:
+            spheroes = json.loads(res.content)
+            print("got scan response: {}".format(spheroes))
+            sphero_devices = sorted(spheroes, key=lambda device: device["name"])
+            sphero_index = -1
+            sphero_scanning = False
+        else:
+            noSphero()
+    except Exception as e:
+        print("Sphero scan failed: {}".format(e))
+        noSphero()
 
 def idleSpheroScan():
     global sphero_attached, sphero_attaching, sphero_devices
