@@ -21,6 +21,7 @@ from threading import Thread
 from enum import Enum
 import requests
 from http.server import BaseHTTPRequestHandler,HTTPServer
+import os.path as path
 
 JoystickModes = Enum("JoystickModes", "Drive Speed Lift HeadTilt SpheroSelect SpheroDrive")
 
@@ -76,6 +77,7 @@ sphero_attaching = False
 sphero_heading = 0
 sphero_devices = []
 sphero_scanning = False
+sphero_idlescan_interval = 3600
 
 cozmoblinky = False
 led_brightness = 1.0
@@ -363,6 +365,7 @@ def camera_handler_setup():
 
 def user_idle_watchdog():
     global idle, connected, disconnecting, last_activity
+    global sphero_devices, sphero_attached, sphero_scanning
     print("user idle watchdog running")
     while True:
         idle = time.time() - last_activity
@@ -372,11 +375,7 @@ def user_idle_watchdog():
             server.cozmoclient.disconnect()
             server.cozmoclient = None
             connected = False
-            requests.post(sphero_server + "disconnectAll")
-            sphero_devices = []
-            sphero_attached = None
-            sphero_scanning = False
-            
+
         sleep(1)
 
 def watchdog():
@@ -559,6 +558,22 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
     global cozmoblinky
     cozmoblinky = not cozmoblinky
 
+def attachToSphero(device):
+    global sphero_attached, sphero_attaching
+    sphero_attaching = True
+    uuid = device["uuid"]
+    print("attaching device: {}…".format(device))
+    data = json.dumps({"uuid": uuid, "disconnectOthers" : True})
+    req = requests.post(sphero_server + "attach", data = data);
+    if req.status_code == 200:
+        sphero_attached = uuid
+        sphero_attaching = False
+        print("ok")
+    else:
+        sphero_attached = None
+        sphero_attaching = False
+        print("failed")
+    
 
 last_held = 0.0
 hold_count = 0
@@ -702,19 +717,7 @@ def joystickthread():
                 if sphero_index > len(sd)-1:
                     sphero_index = len(sd)-1
 
-                device = sd[sphero_index]
-                uuid = device["uuid"]
-                print("attaching device: {}…".format(device))
-                data = json.dumps({"uuid": uuid, "disconnectOthers" : True})
-                req = requests.post(sphero_server + "attach", data = data);
-                if req.status_code == 200:
-                    sphero_attached = sphero_uuid
-                    sphero_attaching = False
-                    print("ok")
-                else:
-                    sphero_attached = None
-                    sphero_attaching = True
-                    print("failed")
+                attachToSphero(sd[sphero_index])
 
             else:
                 driveParams = {};
@@ -763,7 +766,6 @@ def setupRobot():
 
     connecting = True
     disconnecting = False
-
     try:
         cli = pycozmo.client.Client()
         cli.start()
@@ -787,18 +789,17 @@ def setupRobot():
         cli.conn.send(pkt)
         
         connected = True
-        connecting = False
 
-        connectLock.release()
         print("setup done.")
     
-        return True
     except Exception as e:
-        connectLock.release()
         print("failed to connect! " + str(e))
-        connecting = False
+        connected = False
         powerCycleCozmoCharger()
-        return False
+
+    connecting = False
+    connectLock.release()
+    return connected
 
 sphero_blinky = True
 def spheroBlinkThread():
@@ -819,7 +820,7 @@ def backgroundSpheroScan():
     spheroscanner.start()    
     
 def spheroScan():
-    global sphero_devices, sphero_scanning
+    global sphero_devices, sphero_scanning, sphero_index
     sphero_devices = []
     sphero_scanning = True
     print("scanning for Sphero devices...")
@@ -830,14 +831,41 @@ def spheroScan():
         sphero_devices = sorted(spheroes, key=lambda device: device["name"])
         sphero_index = -1
         sphero_scanning = False
-        
+
+def idleSpheroScan():
+    global sphero_attached, sphero_attaching, sphero_devices
+    if idle > timeout:
+        if path.exists("/tmp/live_robots"):
+            spheroScan()
+            sd = sphero_devices.copy()
+            if len(sd) > 0:
+                idx = random.randrange(len(sd))
+                print("idly connecting to device {}".format(idx))
+                attachToSphero(sd[idx])
+        elif sphero_attached != None:
+            requests.post(sphero_server + "disconnectAll")
+            sphero_devices = []
+            sphero_attached = None
+            sphero_attaching = False
+
+    idleSpheroScanTimer()
+
+
+def idleSpheroScanTimer():
+    spheroScanTimer = Timer(sphero_idlescan_interval, idleSpheroScan)
+    spheroScanTimer.setDaemon(True)
+    spheroScanTimer.start()
 
 def run():
     global connected
 
+    backgroundSpheroScan()
+    idleSpheroScanTimer()
+    
     timer = Timer(10, watchdog)
     timer.setDaemon(True)
     timer.start()
+
 
     useridletimer = Thread(target=user_idle_watchdog)
     useridletimer.setDaemon(True)
