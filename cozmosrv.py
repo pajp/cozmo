@@ -71,8 +71,8 @@ idle = 0
 disconnecting = False
 sphero_server = "http://The-Otter.local:4444/"
 sphero_index = 0
-sphero_uuid = None
-sphero_attached = None
+sphero_selected_uuid = None
+sphero_attached_uuid = None
 sphero_attaching = False
 sphero_heading = 0
 sphero_devices = []
@@ -365,7 +365,7 @@ def camera_handler_setup():
 
 def user_idle_watchdog():
     global idle, connected, disconnecting, last_activity
-    global sphero_devices, sphero_attached, sphero_scanning
+    global sphero_devices, sphero_attached_uuid, sphero_scanning
     print("user idle watchdog running")
     while True:
         idle = time.time() - last_activity
@@ -419,7 +419,7 @@ def on_robot_charging(cli, state):
 def update_led():
     global connected, disconnecting, idle
     global cozmoblinky
-    global sphero_devices, sphero_index, sphero_blinky, sphero_uuid
+    global sphero_devices, sphero_index, sphero_blinky, sphero_selected_uuid
     global led_brightness
     global pixels
     old_pixels = pixels.copy()
@@ -485,9 +485,9 @@ def update_led():
     else:
         for i in range(0,len(sd)):
             pxl = 48+i
-            #print("comparing uuid {} with selected uuid {}".format(sphero_devices[i]["uuid"], sphero_uuid))
-            
-            if sphero_blinky and sphero_devices[i]["uuid"] == sphero_uuid:
+#            if sphero_blinky:
+#                print("sphero_selected_uuid={}, sd uuid={}".format(sphero_selected_uuid, sd[i]["uuid"]))
+            if sphero_blinky and sd[i]["uuid"] == sphero_selected_uuid:
                 sphero_index = i
                 pixels[pxl] = (255, 255, 255)
             elif sd[i]["name"].startswith("Lightning"):
@@ -499,12 +499,12 @@ def update_led():
             else:
                 print("Unknown Sphero bot at index {}".format(i))
 
-    if sphero_attached != None:
-        pixels[62] = (0,128,0)
-    elif sphero_attaching:
-        pixels[62] = (128,128,0)
+    if sphero_attaching:
+        pixels[62] = (255,255,0)
+    elif sphero_attached_uuid != None:
+        pixels[62] = (0,255,0)
     else:
-        pixels[62] = (128,0,0)
+        pixels[62] = (255,0,0)
 
     cozmopxl = (0,0,0)
     if connecting:
@@ -559,18 +559,18 @@ def on_robot_state(cli, pkt: pycozmo.protocol_encoder.RobotState):
     cozmoblinky = not cozmoblinky
 
 def attachToSphero(device):
-    global sphero_attached, sphero_attaching
+    global sphero_attached_uuid, sphero_attaching, sphero_selected_uuid
     sphero_attaching = True
     uuid = device["uuid"]
     print("attaching device: {}…".format(device))
     data = json.dumps({"uuid": uuid, "disconnectOthers" : True})
     req = requests.post(sphero_server + "attach", data = data);
     if req.status_code == 200:
-        sphero_attached = uuid
+        sphero_selected_uuid = sphero_attached_uuid = uuid
         sphero_attaching = False
         print("ok")
     else:
-        sphero_attached = None
+        sphero_attached_uuid = None
         sphero_attaching = False
         print("failed")
     
@@ -579,7 +579,7 @@ last_held = 0.0
 hold_count = 0
 def joystickthread():
     global last_activity, joystick_mode, current_lift, current_head_tilt, joystick_speed, server
-    global sphero_server, sphero_attached, sphero_attaching, sphero_heading, sphero_speed, sphero_index, sphero_uuid
+    global sphero_server, sphero_attached_uuid, sphero_attaching, sphero_heading, sphero_speed, sphero_index, sphero_selected_uuid
     global last_held, hold_count
     global connected
     while True:
@@ -636,7 +636,7 @@ def joystickthread():
                 if sphero_index < 0:
                     sphero_index = len(sphero_devices)-1
 
-            sphero_uuid = sphero_devices[sphero_index]["uuid"]
+            sphero_selected_uuid = sphero_devices[sphero_index]["uuid"]
 
             if len(sphero_devices) > 0:
                 print("sphero index: {}, device: {}".format(sphero_index, sphero_devices[sphero_index]))
@@ -711,7 +711,7 @@ def joystickthread():
             server.cozmoclient.set_lift_height(height=height)
 
         if joystick_mode == JoystickModes.SpheroDrive:
-            if len(sphero_devices) > 0 and sphero_attached != sphero_uuid:
+            if len(sphero_devices) > 0 and sphero_attached_uuid != sphero_selected_uuid:
                 sphero_attaching = True
                 sd = sphero_devices.copy()
                 if sphero_index > len(sd)-1:
@@ -820,10 +820,11 @@ def backgroundSpheroScan():
     spheroscanner.start()    
 
 def noSphero():
+    global sphero_scanning, sphero_index, sphero_devices, sphero_attached_uuid, sphero_attaching
     sphero_scanning = False
     sphero_index = -1
     sphero_devices = []
-    sphero_attached = None
+    sphero_attached_uuid = None
     sphero_attaching = False
     
 def spheroScan():
@@ -846,25 +847,32 @@ def spheroScan():
         noSphero()
 
 def idleSpheroScan():
-    global sphero_attached, sphero_attaching, sphero_devices
+    global sphero_attached_uuid, sphero_attaching, sphero_devices
     if idle > timeout:
-        if path.exists("/tmp/live_robots"):
+        if path.exists("/var/lib/homebridge/live_robots"):
+            print("idle sphero scan starting")
             spheroScan()
             sd = sphero_devices.copy()
             if len(sd) > 0:
                 idx = random.randrange(len(sd))
                 print("idly connecting to device {}".format(idx))
                 attachToSphero(sd[idx])
-        elif sphero_attached != None:
+        elif sphero_attached_uuid != None:
+            print("idle disconnecting Sphero devices")
             requests.post(sphero_server + "disconnectAll")
             sphero_devices = []
-            sphero_attached = None
+            sphero_attached_uuid = None
             sphero_attaching = False
+        else:
+            print("robot switch is off")
+    else:
+        print("no idle sphero scan: idle={}, timeout={}".format(idle, timeout))
 
     idleSpheroScanTimer()
 
 
 def idleSpheroScanTimer():
+    print("idle sphero scan timer {} in seconds started".format(sphero_idlescan_interval))
     spheroScanTimer = Timer(sphero_idlescan_interval, idleSpheroScan)
     spheroScanTimer.setDaemon(True)
     spheroScanTimer.start()
